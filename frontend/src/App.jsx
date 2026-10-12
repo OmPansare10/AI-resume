@@ -1,7 +1,13 @@
 import { useState, useEffect, useRef } from "react";
 import "./App.css";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || `http://${window.location.hostname || "127.0.0.1"}:8001/api`;
+const CLOUD_API_BASE = "https://ai-resume-nset.onrender.com/api";
+
+const isLocalhost = typeof window !== "undefined" && 
+  (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 
+  (isLocalhost ? `http://${window.location.hostname}:8001/api` : CLOUD_API_BASE);
 
 const QUICK_PROMPTS = [
   "Switch project database to MongoDB & Redis",
