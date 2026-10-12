@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import "./App.css";
 
-const API_BASE = "http://127.0.0.1:8001/api";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || `http://${window.location.hostname || "127.0.0.1"}:8001/api`;
 
 const QUICK_PROMPTS = [
   "Switch project database to MongoDB & Redis",

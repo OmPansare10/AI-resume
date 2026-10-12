@@ -19,14 +19,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000"
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -49,12 +42,13 @@ def home():
 
 @app.get("/api/health")
 def health_check():
-    ollama_info = get_ollama_client_info()
+    ai_info = get_ollama_client_info()
     return {
         "status": "healthy",
-        "ollama": ollama_info["running"],
-        "model": ollama_info["model_configured"],
-        "model_found": ollama_info["model_found"],
-        "available_models": ollama_info["available_models"],
-        "error": ollama_info.get("error")
+        "ollama": ai_info["running"],
+        "provider": ai_info.get("provider", "ollama"),
+        "model": ai_info["model_configured"],
+        "model_found": ai_info["model_found"],
+        "available_models": ai_info["available_models"],
+        "error": ai_info.get("error")
     }

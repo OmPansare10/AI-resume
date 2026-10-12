@@ -14,11 +14,43 @@ logger = logging.getLogger(__name__)
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
 
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+
 
 def get_ollama_client_info() -> Dict[str, Any]:
     """
-    Check Ollama connectivity and whether the configured model is available.
+    Check AI connectivity:
+    1. If GROQ_API_KEY is configured, uses ultra-fast zero-storage Cloud LLM.
+    2. If OPENAI_API_KEY is configured, uses OpenAI Cloud.
+    3. Otherwise, checks local Ollama server connectivity.
     """
+    # 1. Groq Cloud Check
+    if GROQ_API_KEY:
+        return {
+            "running": True,
+            "provider": "groq",
+            "model_configured": f"Groq Cloud ({GROQ_MODEL})",
+            "model_found": True,
+            "available_models": [GROQ_MODEL, "llama-3.1-8b-instant"],
+            "error": None
+        }
+
+    # 2. OpenAI Cloud Check
+    if OPENAI_API_KEY:
+        return {
+            "running": True,
+            "provider": "openai",
+            "model_configured": f"OpenAI Cloud ({OPENAI_MODEL})",
+            "model_found": True,
+            "available_models": [OPENAI_MODEL],
+            "error": None
+        }
+
+    # 3. Local Ollama Check
     try:
         response = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=3)
         if response.status_code == 200:
@@ -33,6 +65,7 @@ def get_ollama_client_info() -> Dict[str, Any]:
             )
             return {
                 "running": True,
+                "provider": "ollama",
                 "model_configured": model_configured,
                 "model_found": model_found,
                 "available_models": models,
@@ -41,6 +74,7 @@ def get_ollama_client_info() -> Dict[str, Any]:
         else:
             return {
                 "running": False,
+                "provider": "ollama",
                 "model_configured": OLLAMA_MODEL,
                 "model_found": False,
                 "available_models": [],
@@ -49,10 +83,11 @@ def get_ollama_client_info() -> Dict[str, Any]:
     except requests.exceptions.RequestException:
         return {
             "running": False,
+            "provider": "ollama",
             "model_configured": OLLAMA_MODEL,
             "model_found": False,
             "available_models": [],
-            "error": "Ollama is not running. Please start Ollama on your machine and try again."
+            "error": "Ollama is not running. Please start Ollama or set GROQ_API_KEY in backend/.env for zero-storage Cloud AI."
         }
 
 
@@ -97,14 +132,83 @@ def safe_extract_json(raw_text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def call_ollama(prompt: str, system_prompt: str = "", temperature: float = 0.1, timeout_seconds: int = 300) -> str:
+def call_groq(prompt: str, system_prompt: str = "", temperature: float = 0.1, timeout_seconds: int = 60) -> str:
+    """
+    Call Groq Cloud API for lightning-fast Llama-3 inference without local disk usage.
+    """
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
+    payload: Dict[str, Any] = {
+        "model": GROQ_MODEL,
+        "messages": messages,
+        "temperature": temperature,
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=timeout_seconds)
+        if response.status_code != 200:
+            error_msg = response.text
+            try:
+                error_data = response.json()
+                error_msg = error_data.get("error", {}).get("message", error_msg)
+            except Exception:
+                pass
+            raise RuntimeError(f"Groq API error ({response.status_code}): {error_msg}")
+        data = response.json()
+        return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    except requests.exceptions.Timeout:
+        raise RuntimeError("Groq Cloud request timed out. Please try again.")
+    except Exception as e:
+        if isinstance(e, RuntimeError):
+            raise e
+        raise RuntimeError(f"Groq API connection error: {str(e)}")
+
+
+def call_openai(prompt: str, system_prompt: str = "", temperature: float = 0.1, timeout_seconds: int = 60) -> str:
+    """
+    Call OpenAI Cloud API.
+    """
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
+    payload = {
+        "model": OPENAI_MODEL,
+        "messages": messages,
+        "temperature": temperature
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=timeout_seconds)
+        if response.status_code != 200:
+            raise RuntimeError(f"OpenAI error ({response.status_code}): {response.text}")
+        data = response.json()
+        return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    except Exception as e:
+        raise RuntimeError(f"OpenAI API connection error: {str(e)}")
+
+
+def call_ollama_local(prompt: str, system_prompt: str = "", temperature: float = 0.1, timeout_seconds: int = 300) -> str:
     """
     Send prompt to local Ollama API via /api/chat.
-    Optimized for multi-core CPUs with 8 worker threads and 5-minute timeout.
     """
     health = get_ollama_client_info()
     if not health["running"]:
-        raise RuntimeError("Ollama is not running. Please start Ollama and try again.")
+        raise RuntimeError("Ollama is not running. Please start Ollama or configure GROQ_API_KEY in backend/.env.")
 
     url = f"{OLLAMA_BASE_URL}/api/chat"
     payload = {
@@ -133,11 +237,26 @@ def call_ollama(prompt: str, system_prompt: str = "", temperature: float = 0.1, 
     except requests.exceptions.Timeout:
         raise RuntimeError("Ollama request timed out. Please try again or ensure your computer has sufficient free RAM.")
     except requests.exceptions.ConnectionError:
-        raise RuntimeError("Ollama is not running. Please start Ollama and try again.")
+        raise RuntimeError("Ollama is not running. Please start Ollama or set GROQ_API_KEY for Cloud AI.")
     except Exception as e:
         if isinstance(e, RuntimeError):
             raise e
         raise RuntimeError(f"Ollama error: {str(e)}")
+
+
+def call_ollama(prompt: str, system_prompt: str = "", temperature: float = 0.1, timeout_seconds: int = 300) -> str:
+    """
+    Universal AI caller:
+    Prioritizes Cloud AI (Groq/OpenAI) to preserve device disk space.
+    Falls back gracefully to local Ollama if no cloud API key is configured.
+    """
+    if GROQ_API_KEY:
+        return call_groq(prompt, system_prompt=system_prompt, temperature=temperature, timeout_seconds=timeout_seconds)
+    elif OPENAI_API_KEY:
+        return call_openai(prompt, system_prompt=system_prompt, temperature=temperature, timeout_seconds=timeout_seconds)
+    else:
+        return call_ollama_local(prompt, system_prompt=system_prompt, temperature=temperature, timeout_seconds=timeout_seconds)
+
 
 
 def calculate_match_score(required_skills: List[str], matching_skills: List[str], missing_skills: List[str]) -> Dict[str, Any]:

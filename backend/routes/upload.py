@@ -200,17 +200,17 @@ async def analyze_and_tailor(payload: AnalyzeRequest):
     if not payload.resume_text.strip():
         raise HTTPException(status_code=400, detail="Master Resume text cannot be empty.")
 
-    # 1. Check Ollama readiness
+    # 1. Check AI readiness (Cloud AI or local Ollama)
     health = get_ollama_client_info()
     if not health["running"]:
         raise HTTPException(
             status_code=503,
-            detail="Ollama is not running. Please start Ollama on your machine and try again."
+            detail=health.get("error") or "AI service is not ready. Please configure GROQ_API_KEY in backend/.env or start local Ollama."
         )
     if not health["model_found"] and not health["available_models"]:
         raise HTTPException(
             status_code=503,
-            detail=f"Configured Ollama model was not found. Please run 'ollama pull {health['model_configured']}'."
+            detail=f"Configured model '{health['model_configured']}' was not found. Please check your configuration."
         )
 
     try:
