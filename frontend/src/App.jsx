@@ -609,7 +609,8 @@ function App() {
         setHealth({
           loading: false,
           ollama: data.ollama,
-          model: data.model || "llama3.2:3b",
+          provider: data.provider || "ollama",
+          model: data.model || "Cloud AI",
           model_found: data.model_found,
           error: data.error
         });
@@ -617,7 +618,8 @@ function App() {
         setHealth({
           loading: false,
           ollama: false,
-          model: "llama3.2:3b",
+          provider: "offline",
+          model: "AI Offline",
           model_found: false,
           error: "Backend responded with an error."
         });
@@ -626,9 +628,10 @@ function App() {
       setHealth({
         loading: false,
         ollama: false,
-        model: "llama3.2:3b",
+        provider: "offline",
+        model: "AI Offline",
         model_found: false,
-        error: "Cannot connect to backend server on port 8001."
+        error: "Cannot connect to backend server. Please verify your backend is running."
       });
     }
   };
@@ -1038,28 +1041,29 @@ function App() {
               />
               <span className="model-name">
                 {health.loading
-                  ? "Checking Ollama..."
+                  ? "Checking AI status..."
                   : health.ollama
-                  ? `Ollama: ${health.model}`
-                  : "Ollama Offline"}
+                  ? `${health.provider === "groq" ? "Cloud AI" : "AI"}: ${health.model}`
+                  : "AI Backend Offline"}
               </span>
             </div>
-            <span className="secure-badge">🔒 100% Local & Private</span>
+            <span className="secure-badge">
+              {health.provider === "groq" ? "⚡ Cloud AI Powered" : "🔒 Private & Secure"}
+            </span>
           </div>
         </div>
       </header>
 
-      {/* Warning banner if Ollama is offline */}
+      {/* Warning banner if AI backend is offline */}
       {!health.loading && (!health.ollama || !health.model_found) && (
         <div className="warning-banner">
           <div className="warning-content">
             <span className="warning-icon">⚠️</span>
             <div>
-              <strong>Local Ollama Service Required</strong>
+              <strong>Backend Service Disconnected</strong>
               <p>
-                {health.error || "Ollama is not running on localhost:11434."}{" "}
-                Please start Ollama on your PC (<code>ollama run {health.model}</code>)
-                to enable local AI tailoring.
+                {health.error || "Cannot connect to backend API."}{" "}
+                If running on Vercel, make sure <code>VITE_API_BASE_URL</code> is set to your Render URL.
               </p>
             </div>
           </div>
