@@ -3,11 +3,15 @@ import "./App.css";
 
 const CLOUD_API_BASE = "https://ai-resume-nset.onrender.com/api";
 
+const rawEnvUrl = (import.meta.env.VITE_API_BASE_URL || "").trim();
+const hasRealEnvUrl = rawEnvUrl && !rawEnvUrl.includes("YOUR-RENDER-URL") && rawEnvUrl.startsWith("http");
+
 const isLocalhost = typeof window !== "undefined" && 
   (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 
-  (isLocalhost ? `http://${window.location.hostname}:8001/api` : CLOUD_API_BASE);
+const API_BASE = hasRealEnvUrl 
+  ? rawEnvUrl 
+  : (isLocalhost ? `http://${window.location.hostname}:8001/api` : CLOUD_API_BASE);
 
 const QUICK_PROMPTS = [
   "Switch project database to MongoDB & Redis",
