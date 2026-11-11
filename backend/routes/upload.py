@@ -17,6 +17,12 @@ from services.resume_tailor import (
     tailor_resume_intelligently
 )
 from services.resume_generator import generate_docx, generate_pdf
+from services.fresher_resume_service import (
+    tailor_fresher_resume_single_page,
+    edit_single_page_fresher_resume,
+    generate_single_page_pdf,
+    generate_single_page_docx
+)
 
 router = APIRouter()
 
@@ -34,6 +40,7 @@ class AnalyzeRequest(BaseModel):
     jd_text: str = Field(..., min_length=10, description="Job description text")
     resume_text: str = Field(..., min_length=10, description="Master resume text")
     resume_filename: Optional[str] = Field("", description="Original resume filename")
+    base_tailored_resume: Optional[Dict[str, Any]] = Field(default=None, description="Tailored content from Resume 1")
 
 
 class EditResumeRequest(BaseModel):
@@ -43,6 +50,7 @@ class EditResumeRequest(BaseModel):
     images_data: Optional[List[str]] = Field(default=None, description="List of multiple base64 encoded images or screenshots")
     original_resume_text: Optional[str] = ""
     jd_text: Optional[str] = ""
+    base_tailored_resume: Optional[Dict[str, Any]] = Field(default=None, description="Tailored content from Resume 1")
 
 
 class DownloadDocxRequest(BaseModel):
@@ -220,6 +228,21 @@ async def analyze_and_tailor(payload: AnalyzeRequest):
             resume_text=payload.resume_text,
             filename=payload.resume_filename or ""
         )
+
+        # Dedicated single-page fresher optimization pipeline
+        try:
+            fresher_result = tailor_fresher_resume_single_page(
+                jd_text=payload.jd_text,
+                resume_text=payload.resume_text,
+                filename=payload.resume_filename or "",
+                base_tailored_resume=result.get("tailored_content")
+            )
+            result["single_page_tailored_content"] = fresher_result.get("single_page_tailored_content")
+            result["single_page_advice"] = fresher_result.get("single_page_advice")
+        except Exception as f_err:
+            import logging
+            logging.getLogger(__name__).warning(f"Fresher pipeline initial generation warning: {f_err}")
+
         return result
 
     except RuntimeError as re_err:
@@ -229,6 +252,7 @@ async def analyze_and_tailor(payload: AnalyzeRequest):
 
 
 @router.post("/edit-resume")
+@router.post("/edit-tailored-resume")
 async def edit_resume_endpoint(payload: EditResumeRequest):
     """
     Edit with AI: Modify tailored content based on user instructions and/or attached image(s)
@@ -265,7 +289,10 @@ async def download_docx_endpoint(payload: DownloadDocxRequest):
         raise HTTPException(status_code=400, detail="Tailored resume content is required.")
 
     try:
-        file_path = generate_docx(content)
+        if content.get("single_page") or content.get("compact_layout"):
+            file_path = generate_single_page_docx(content)
+        else:
+            file_path = generate_docx(content)
         if not file_path.exists():
             raise HTTPException(status_code=500, detail="Failed to locate generated document.")
 
@@ -292,7 +319,10 @@ async def download_pdf_endpoint(payload: DownloadPdfRequest):
         raise HTTPException(status_code=400, detail="Tailored resume content is required.")
 
     try:
-        file_path = generate_pdf(content)
+        if content.get("single_page") or content.get("compact_layout"):
+            file_path = generate_single_page_pdf(content)
+        else:
+            file_path = generate_pdf(content)
         if not file_path.exists():
             raise HTTPException(status_code=500, detail="Failed to locate generated PDF document.")
 
@@ -307,4 +337,106 @@ async def download_pdf_endpoint(payload: DownloadPdfRequest):
         )
     except Exception as err:
         raise HTTPException(status_code=500, detail=f"Could not generate PDF: {str(err)}")
+
+
+@router.post("/analyze-single-page")
+async def analyze_single_page_endpoint(payload: AnalyzeRequest):
+    """
+    Dedicated AI single-page fresher resume generation & optimization pipeline.
+    """
+    if not payload.jd_text.strip():
+        raise HTTPException(status_code=400, detail="Job Description cannot be empty.")
+    if not payload.resume_text.strip():
+        raise HTTPException(status_code=400, detail="Master Resume text cannot be empty.")
+
+    try:
+        result = tailor_fresher_resume_single_page(
+            jd_text=payload.jd_text,
+            resume_text=payload.resume_text,
+            filename=payload.resume_filename or "",
+            base_tailored_resume=payload.base_tailored_resume
+        )
+        return result
+    except Exception as err:
+        raise HTTPException(status_code=500, detail=f"Single-page fresher analysis failed: {str(err)}")
+
+
+@router.post("/edit-single-page-resume")
+async def edit_single_page_resume_endpoint(payload: EditResumeRequest):
+    """
+    Chat 2: Edit Single-Page Fresher Resume exclusively without modifying Resume 1.
+    """
+    has_instruction = bool((payload.instruction or "").strip())
+    has_images = bool(payload.image_data or (payload.images_data and len(payload.images_data) > 0))
+    if not has_instruction and not has_images:
+        raise HTTPException(status_code=400, detail="Please provide an instruction or attach an image.")
+
+    try:
+        result = edit_single_page_fresher_resume(
+            resume_content=payload.resume_content,
+            instruction=payload.instruction or "",
+            original_resume_text=payload.original_resume_text or "",
+            jd_text=payload.jd_text or "",
+            image_data=payload.image_data,
+            images_data=payload.images_data,
+            base_tailored_resume=payload.base_tailored_resume
+        )
+        return result
+    except Exception as err:
+        raise HTTPException(status_code=500, detail=f"Single-page edit failed: {str(err)}")
+
+
+@router.post("/download-single-page-pdf")
+async def download_single_page_pdf_endpoint(payload: DownloadPdfRequest):
+    """
+    Generates a verified 1-page A4 PDF specifically for freshers.
+    """
+    content = payload.tailored_content or payload.resume_data
+    if not content:
+        raise HTTPException(status_code=400, detail="Single-page resume content is required.")
+
+    try:
+        file_path = generate_single_page_pdf(content)
+        if not file_path.exists():
+            raise HTTPException(status_code=500, detail="Failed to locate generated single-page PDF.")
+
+        candidate_name = content.get("name", "Fresher_Resume")
+        safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', candidate_name).strip('_')
+        download_filename = f"{safe_name}_SinglePage_Fresher_Resume.pdf"
+
+        return FileResponse(
+            path=str(file_path),
+            filename=download_filename,
+            media_type="application/pdf"
+        )
+    except Exception as err:
+        raise HTTPException(status_code=500, detail=f"Could not generate single-page PDF: {str(err)}")
+
+
+@router.post("/download-single-page-docx")
+async def download_single_page_docx_endpoint(payload: DownloadDocxRequest):
+    """
+    Generates a compact, 1-page optimized DOCX specifically for freshers.
+    """
+    content = payload.tailored_content or payload.resume_data
+    if not content:
+        raise HTTPException(status_code=400, detail="Single-page resume content is required.")
+
+    try:
+        file_path = generate_single_page_docx(content)
+        if not file_path.exists():
+            raise HTTPException(status_code=500, detail="Failed to locate generated single-page DOCX.")
+
+        candidate_name = content.get("name", "Fresher_Resume")
+        safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', candidate_name).strip('_')
+        download_filename = f"{safe_name}_SinglePage_Fresher_Resume.docx"
+
+        return FileResponse(
+            path=str(file_path),
+            filename=download_filename,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+    except Exception as err:
+        raise HTTPException(status_code=500, detail=f"Could not generate single-page DOCX: {str(err)}")
+
 

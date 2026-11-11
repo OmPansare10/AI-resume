@@ -4,7 +4,7 @@ import io
 import logging
 import re
 from typing import Optional, Tuple
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 logger = logging.getLogger(__name__)
 
@@ -17,10 +17,78 @@ async def _run_winocr(pil_img: Image.Image) -> str:
         logger.warning(f"winocr recognition failed: {e}")
         return ""
 
+
+def _prepare_ocr_image(pil_img: Image.Image, high_contrast: bool = False) -> Image.Image:
+    """
+    Normalize alpha transparency onto white, invert dark-mode crops,
+    upscale small tightly cropped snippets, and pad borders so Windows OCR
+    reliably reads single-line and low-height screenshots.
+    """
+    if pil_img.mode in ("RGBA", "LA") or (pil_img.mode == "P" and "transparency" in pil_img.info):
+        rgba = pil_img.convert("RGBA")
+        bg = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        bg.paste(rgba, mask=rgba.split()[3])
+        work = bg.convert("RGB")
+    elif pil_img.mode != "RGB":
+        work = pil_img.convert("RGB")
+    else:
+        work = pil_img.copy()
+
+    # Check outer corner/border brightness to handle dark-mode snippets cleanly
+    gray = work.convert("L")
+    w, h = gray.size
+    sample_pts = [
+        (0, 0),
+        (max(0, w - 1), 0),
+        (0, max(0, h - 1)),
+        (max(0, w - 1), max(0, h - 1)),
+        (w // 2, 0),
+        (w // 2, max(0, h - 1)),
+    ]
+    edge_mean = sum(gray.getpixel(pt) for pt in sample_pts) / len(sample_pts)
+    if edge_mean < 110:
+        work = ImageOps.invert(work)
+
+    # Upscale small/thin screenshots (e.g., 1-line 18px-60px tall bullet crops)
+    scale = 1
+    if h < 180 or w < 900:
+        scale_h = max(1, (180 + max(1, h) - 1) // max(1, h))
+        scale_w = max(1, (900 + max(1, w) - 1) // max(1, w))
+        scale = min(4, max(2, scale_h, scale_w))
+        max_side = max(w, h)
+        while scale > 1 and max_side * scale > 3200:
+            scale -= 1
+    if scale > 1:
+        work = work.resize((w * scale, h * scale), Image.Resampling.LANCZOS)
+
+    if high_contrast:
+        g = ImageOps.autocontrast(work.convert("L"))
+        g = ImageEnhance.Sharpness(g).enhance(1.6)
+        work = g.convert("RGB")
+
+    # Add generous white margin around tightly cropped lines
+    work = ImageOps.expand(work, border=48, fill=(255, 255, 255))
+    return work
+
+
+def _execute_ocr_sync(pil_img: Image.Image) -> str:
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                future = pool.submit(lambda: asyncio.run(_run_winocr(pil_img)))
+                return future.result(timeout=10)
+        return loop.run_until_complete(_run_winocr(pil_img))
+    except RuntimeError:
+        return asyncio.run(_run_winocr(pil_img))
+
+
 def extract_text_from_image_b64(image_data: str) -> str:
     """
     Extracts text from a base64 encoded image string using local Windows OCR.
-    Handles data URLs (e.g. 'data:image/png;base64,...') or raw base64.
+    Applies upscaling, alpha compositing, and border padding so even small
+    single-line cropped screenshots extract accurately.
     """
     if not image_data or not isinstance(image_data, str):
         return ""
@@ -32,25 +100,22 @@ def extract_text_from_image_b64(image_data: str) -> str:
         raw_bytes = base64.b64decode(image_data)
         pil_img = Image.open(io.BytesIO(raw_bytes))
 
-        # Convert palette/RGBA if needed to RGB for OCR consistency
-        if pil_img.mode in ("P", "RGBA", "LA"):
-            pil_img = pil_img.convert("RGB")
+        # Primary pass: upscaled + padded clean image
+        prepared = _prepare_ocr_image(pil_img, high_contrast=False)
+        text = _execute_ocr_sync(prepared)
 
-        # Run winocr asynchronously
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # In already running event loop
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(lambda: asyncio.run(_run_winocr(pil_img)))
-                    text = future.result(timeout=10)
-            else:
-                text = loop.run_until_complete(_run_winocr(pil_img))
-        except RuntimeError:
-            text = asyncio.run(_run_winocr(pil_img))
+        # Fallback passes for noisy/blurry small crops
+        if len(re.findall(r'[A-Za-z0-9]{2,}', text or "")) < 2:
+            hi = _prepare_ocr_image(pil_img, high_contrast=True)
+            hi_text = _execute_ocr_sync(hi)
+            if len(hi_text.strip()) > len((text or "").strip()):
+                text = hi_text
 
-        return text
+        if not (text or "").strip():
+            rgb_raw = pil_img.convert("RGB") if pil_img.mode != "RGB" else pil_img
+            text = _execute_ocr_sync(rgb_raw)
+
+        return (text or "").strip()
     except Exception as e:
         logger.error(f"Error in extract_text_from_image_b64: {e}")
         return ""

@@ -4,9 +4,13 @@ import os
 import re
 from typing import Any, Dict, List, Optional
 import requests
+from pathlib import Path
 from dotenv import load_dotenv
 
-# Load environment variables
+# Load environment variables reliably from backend/.env or execution context
+_env_path = Path(__file__).resolve().parent.parent / ".env"
+if _env_path.exists():
+    load_dotenv(dotenv_path=_env_path)
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -30,12 +34,15 @@ def get_ollama_client_info() -> Dict[str, Any]:
     """
     # 1. Groq Cloud Check
     if GROQ_API_KEY:
+        groq_models = list(dict.fromkeys([
+            m for m in [GROQ_MODEL, "openai/gpt-oss-20b", "llama-3.1-8b-instant", "qwen/qwen3.8-27b"] if m
+        ]))
         return {
             "running": True,
             "provider": "groq",
             "model_configured": f"Groq Cloud ({GROQ_MODEL})",
             "model_found": True,
-            "available_models": [GROQ_MODEL, "llama-3.1-8b-instant"],
+            "available_models": groq_models,
             "error": None
         }
 
@@ -99,7 +106,7 @@ def safe_extract_json(raw_text: str) -> Optional[Dict[str, Any]]:
     if not raw_text or not raw_text.strip():
         return None
 
-    cleaned = raw_text.strip()
+    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", raw_text, flags=re.IGNORECASE).strip()
 
     # 1. Strip markdown code fences if present
     fence_pattern = r"```(?:json)?\s*([\s\S]*?)\s*```"
@@ -134,7 +141,8 @@ def safe_extract_json(raw_text: str) -> Optional[Dict[str, Any]]:
 
 def call_groq(prompt: str, system_prompt: str = "", temperature: float = 0.1, timeout_seconds: int = 60) -> str:
     """
-    Call Groq Cloud API for lightning-fast Llama-3 inference without local disk usage.
+    Call Groq Cloud API with automatic model failover across configured and secondary models
+    when encountering rate limits (429), transient timeouts, or unavailable models.
     """
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
@@ -146,30 +154,50 @@ def call_groq(prompt: str, system_prompt: str = "", temperature: float = 0.1, ti
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
-    payload: Dict[str, Any] = {
-        "model": GROQ_MODEL,
-        "messages": messages,
-        "temperature": temperature,
-    }
+    candidate_models = list(dict.fromkeys(
+        m for m in [GROQ_MODEL, "openai/gpt-oss-20b", "llama-3.1-8b-instant", "qwen/qwen3.8-27b"] if m
+    ))
+    last_error: Optional[Exception] = None
 
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=timeout_seconds)
-        if response.status_code != 200:
+    for model_name in candidate_models:
+        model_max_tokens = 900 if "qwen3.8" in model_name.lower() else 3200
+        payload: Dict[str, Any] = {
+            "model": model_name,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": model_max_tokens,
+        }
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=timeout_seconds)
+            if response.status_code == 200:
+                data = response.json()
+                return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+
             error_msg = response.text
             try:
                 error_data = response.json()
                 error_msg = error_data.get("error", {}).get("message", error_msg)
             except Exception:
                 pass
-            raise RuntimeError(f"Groq API error ({response.status_code}): {error_msg}")
-        data = response.json()
-        return data.get("choices", [{}])[0].get("message", {}).get("content", "")
-    except requests.exceptions.Timeout:
-        raise RuntimeError("Groq Cloud request timed out. Please try again.")
-    except Exception as e:
-        if isinstance(e, RuntimeError):
-            raise e
-        raise RuntimeError(f"Groq API connection error: {str(e)}")
+
+            err = RuntimeError(f"Groq API error ({response.status_code}): {error_msg}")
+            # Fail immediately on authentication errors; retry alternate models on rate limit / transient errors
+            if response.status_code in (401, 403):
+                raise err
+            logger.warning("Groq model '%s' failed (%s): %s. Trying fallback model if available.", model_name, response.status_code, error_msg)
+            last_error = err
+        except requests.exceptions.Timeout:
+            logger.warning("Groq model '%s' timed out. Trying fallback model if available.", model_name)
+            last_error = RuntimeError("Groq Cloud request timed out. Please try again.")
+        except Exception as e:
+            if isinstance(e, RuntimeError) and ("(401)" in str(e) or "(403)" in str(e)):
+                raise e
+            logger.warning("Groq model '%s' connection error: %s", model_name, e)
+            last_error = e if isinstance(e, RuntimeError) else RuntimeError(f"Groq API connection error: {str(e)}")
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("No Groq models available to handle request.")
 
 
 def call_openai(prompt: str, system_prompt: str = "", temperature: float = 0.1, timeout_seconds: int = 60) -> str:
@@ -251,7 +279,13 @@ def call_ollama(prompt: str, system_prompt: str = "", temperature: float = 0.1, 
     Falls back gracefully to local Ollama if no cloud API key is configured.
     """
     if GROQ_API_KEY:
-        return call_groq(prompt, system_prompt=system_prompt, temperature=temperature, timeout_seconds=timeout_seconds)
+        try:
+            return call_groq(prompt, system_prompt=system_prompt, temperature=temperature, timeout_seconds=timeout_seconds)
+        except Exception as groq_err:
+            if OPENAI_API_KEY:
+                logger.warning("Groq failed (%s); falling back to OpenAI.", groq_err)
+                return call_openai(prompt, system_prompt=system_prompt, temperature=temperature, timeout_seconds=timeout_seconds)
+            raise
     elif OPENAI_API_KEY:
         return call_openai(prompt, system_prompt=system_prompt, temperature=temperature, timeout_seconds=timeout_seconds)
     else:

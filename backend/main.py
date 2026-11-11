@@ -1,9 +1,13 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# Load environment variables
+# Load environment variables reliably from backend/.env or execution context
+_env_path = Path(__file__).resolve().parent / ".env"
+if _env_path.exists():
+    load_dotenv(dotenv_path=_env_path)
 load_dotenv()
 
 from routes.upload import router as upload_router
