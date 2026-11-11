@@ -241,6 +241,60 @@ class TestExportParity(unittest.TestCase):
         self._assert_docx_matches_preview(generate_single_page_docx(data))
         self._assert_docx_matches_preview(generate_docx(data))
 
+    def test_download_endpoints_stream_without_storing_files(self) -> None:
+        """Verify HTTP downloads stream PDF/DOCX bytes cleanly without storing files in generated_resumes."""
+        from io import BytesIO
+        from fastapi.testclient import TestClient
+        from main import app
+
+        gen_dir = BACKEND_DIR.parent / "generated_resumes"
+        before_files = set(gen_dir.iterdir()) if gen_dir.exists() else set()
+
+        client = TestClient(app)
+        data = _sample_ai_engineer_resume()
+
+        endpoints = [
+            ("/api/download-pdf", "application/pdf", "Tailored_Resume.pdf", "pdf"),
+            ("/api/download-single-page-pdf", "application/pdf", "SinglePage_Fresher_Resume.pdf", "pdf"),
+            (
+                "/api/download-docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "Tailored_Resume.docx",
+                "docx",
+            ),
+            (
+                "/api/download-single-page-docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "SinglePage_Fresher_Resume.docx",
+                "docx",
+            ),
+        ]
+
+        for route, expected_mime, expected_suffix, kind in endpoints:
+            resp = client.post(route, json={"tailored_content": data})
+            self.assertEqual(resp.status_code, 200, f"{route} returned {resp.status_code}")
+            self.assertIn(expected_mime, resp.headers.get("content-type", ""))
+            disp = resp.headers.get("content-disposition", "")
+            self.assertIn("attachment;", disp)
+            self.assertIn(expected_suffix, disp)
+
+            if kind == "pdf":
+                with fitz.open(stream=resp.content, filetype="pdf") as pdf_doc:
+                    self.assertGreaterEqual(len(pdf_doc), 1)
+                    if "single-page" in route:
+                        self.assertEqual(len(pdf_doc), 1)
+                    self.assertIn("OM PANSARE", pdf_doc[0].get_text())
+            else:
+                word_doc = docx.Document(BytesIO(resp.content))
+                self.assertIn("OM PANSARE", _collect_docx_text(word_doc))
+
+        after_files = set(gen_dir.iterdir()) if gen_dir.exists() else set()
+        self.assertEqual(
+            after_files - before_files,
+            set(),
+            f"Download endpoints unexpectedly persisted files in {gen_dir}: {after_files - before_files}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

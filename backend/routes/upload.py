@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, List
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Body
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from services.resume_parser import extract_resume_text
@@ -16,12 +16,12 @@ from services.resume_tailor import (
     extract_contact_info,
     tailor_resume_intelligently
 )
-from services.resume_generator import generate_docx, generate_pdf
+from services.resume_generator import generate_docx_bytes, generate_pdf_bytes
 from services.fresher_resume_service import (
     tailor_fresher_resume_single_page,
     edit_single_page_fresher_resume,
-    generate_single_page_pdf,
-    generate_single_page_docx
+    generate_single_page_pdf_bytes,
+    generate_single_page_docx_bytes,
 )
 
 router = APIRouter()
@@ -279,10 +279,27 @@ async def edit_resume_endpoint(payload: EditResumeRequest):
         raise HTTPException(status_code=500, detail=f"Edit with AI failed: {str(err)}")
 
 
+def _build_download_response(
+    file_bytes: bytes,
+    candidate_name: Any,
+    default_name: str,
+    suffix: str,
+    media_type: str,
+) -> Response:
+    """Stream generated document bytes directly to client without persisting on disk."""
+    safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", str(candidate_name or default_name)).strip("_") or default_name
+    download_filename = f"{safe_name}_{suffix}"
+    return Response(
+        content=file_bytes,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{download_filename}"'},
+    )
+
+
 @router.post("/download-docx")
 async def download_docx_endpoint(payload: DownloadDocxRequest):
     """
-    Generates a professional DOCX resume and returns it as a downloadable file.
+    Generates a professional DOCX resume in memory and streams it directly to the client.
     """
     content = payload.tailored_content or payload.resume_data
     if not content:
@@ -290,20 +307,18 @@ async def download_docx_endpoint(payload: DownloadDocxRequest):
 
     try:
         if content.get("single_page") or content.get("compact_layout"):
-            file_path = generate_single_page_docx(content)
+            file_bytes = generate_single_page_docx_bytes(content)
         else:
-            file_path = generate_docx(content)
-        if not file_path.exists():
-            raise HTTPException(status_code=500, detail="Failed to locate generated document.")
+            file_bytes = generate_docx_bytes(content)
+        if not file_bytes:
+            raise HTTPException(status_code=500, detail="Failed to generate DOCX document.")
 
-        candidate_name = content.get("name", "Tailored_Resume")
-        safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', candidate_name).strip('_')
-        download_filename = f"{safe_name}_Tailored_Resume.docx"
-
-        return FileResponse(
-            path=str(file_path),
-            filename=download_filename,
-            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        return _build_download_response(
+            file_bytes=file_bytes,
+            candidate_name=content.get("name"),
+            default_name="Tailored_Resume",
+            suffix="Tailored_Resume.docx",
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         )
     except Exception as err:
         raise HTTPException(status_code=500, detail=f"Could not generate DOCX: {str(err)}")
@@ -312,7 +327,7 @@ async def download_docx_endpoint(payload: DownloadDocxRequest):
 @router.post("/download-pdf")
 async def download_pdf_endpoint(payload: DownloadPdfRequest):
     """
-    Generates an executive-level, ATS-friendly PDF resume and returns it as a downloadable file.
+    Generates an executive-level, ATS-friendly PDF resume in memory and streams it directly.
     """
     content = payload.tailored_content or payload.resume_data
     if not content:
@@ -320,20 +335,18 @@ async def download_pdf_endpoint(payload: DownloadPdfRequest):
 
     try:
         if content.get("single_page") or content.get("compact_layout"):
-            file_path = generate_single_page_pdf(content)
+            file_bytes = generate_single_page_pdf_bytes(content)
         else:
-            file_path = generate_pdf(content)
-        if not file_path.exists():
-            raise HTTPException(status_code=500, detail="Failed to locate generated PDF document.")
+            file_bytes = generate_pdf_bytes(content)
+        if not file_bytes:
+            raise HTTPException(status_code=500, detail="Failed to generate PDF document.")
 
-        candidate_name = content.get("name", "Tailored_Resume")
-        safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', candidate_name).strip('_')
-        download_filename = f"{safe_name}_Tailored_Resume.pdf"
-
-        return FileResponse(
-            path=str(file_path),
-            filename=download_filename,
-            media_type="application/pdf"
+        return _build_download_response(
+            file_bytes=file_bytes,
+            candidate_name=content.get("name"),
+            default_name="Tailored_Resume",
+            suffix="Tailored_Resume.pdf",
+            media_type="application/pdf",
         )
     except Exception as err:
         raise HTTPException(status_code=500, detail=f"Could not generate PDF: {str(err)}")
@@ -389,25 +402,23 @@ async def edit_single_page_resume_endpoint(payload: EditResumeRequest):
 @router.post("/download-single-page-pdf")
 async def download_single_page_pdf_endpoint(payload: DownloadPdfRequest):
     """
-    Generates a verified 1-page A4 PDF specifically for freshers.
+    Generates a verified 1-page A4 PDF in memory and streams it directly without saving on disk.
     """
     content = payload.tailored_content or payload.resume_data
     if not content:
         raise HTTPException(status_code=400, detail="Single-page resume content is required.")
 
     try:
-        file_path = generate_single_page_pdf(content)
-        if not file_path.exists():
-            raise HTTPException(status_code=500, detail="Failed to locate generated single-page PDF.")
+        file_bytes = generate_single_page_pdf_bytes(content)
+        if not file_bytes:
+            raise HTTPException(status_code=500, detail="Failed to generate single-page PDF.")
 
-        candidate_name = content.get("name", "Fresher_Resume")
-        safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', candidate_name).strip('_')
-        download_filename = f"{safe_name}_SinglePage_Fresher_Resume.pdf"
-
-        return FileResponse(
-            path=str(file_path),
-            filename=download_filename,
-            media_type="application/pdf"
+        return _build_download_response(
+            file_bytes=file_bytes,
+            candidate_name=content.get("name"),
+            default_name="Fresher_Resume",
+            suffix="SinglePage_Fresher_Resume.pdf",
+            media_type="application/pdf",
         )
     except Exception as err:
         raise HTTPException(status_code=500, detail=f"Could not generate single-page PDF: {str(err)}")
@@ -416,25 +427,23 @@ async def download_single_page_pdf_endpoint(payload: DownloadPdfRequest):
 @router.post("/download-single-page-docx")
 async def download_single_page_docx_endpoint(payload: DownloadDocxRequest):
     """
-    Generates a compact, 1-page optimized DOCX specifically for freshers.
+    Generates a compact, 1-page optimized DOCX in memory and streams it directly without saving on disk.
     """
     content = payload.tailored_content or payload.resume_data
     if not content:
         raise HTTPException(status_code=400, detail="Single-page resume content is required.")
 
     try:
-        file_path = generate_single_page_docx(content)
-        if not file_path.exists():
-            raise HTTPException(status_code=500, detail="Failed to locate generated single-page DOCX.")
+        file_bytes = generate_single_page_docx_bytes(content)
+        if not file_bytes:
+            raise HTTPException(status_code=500, detail="Failed to generate single-page DOCX.")
 
-        candidate_name = content.get("name", "Fresher_Resume")
-        safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', candidate_name).strip('_')
-        download_filename = f"{safe_name}_SinglePage_Fresher_Resume.docx"
-
-        return FileResponse(
-            path=str(file_path),
-            filename=download_filename,
-            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        return _build_download_response(
+            file_bytes=file_bytes,
+            candidate_name=content.get("name"),
+            default_name="Fresher_Resume",
+            suffix="SinglePage_Fresher_Resume.docx",
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         )
     except Exception as err:
         raise HTTPException(status_code=500, detail=f"Could not generate single-page DOCX: {str(err)}")

@@ -34,10 +34,23 @@ export function EditableResumeText({
 
   const handleBlur = (e) => {
     if (!editable || !onCommit) return;
-    const nextText = e.currentTarget.textContent ?? "";
+    const nextText = (e.currentTarget.textContent ?? "")
+      .replace(/[\r\n]+/g, " ")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+    if (e.currentTarget.textContent !== nextText) {
+      e.currentTarget.textContent = nextText;
+    }
     if (nextText !== lastValueRef.current) {
       lastValueRef.current = nextText;
       onCommit(nextText);
+    }
+  };
+
+  const handleKeyDown = (e) => {
+    if (editable && e.key === "Enter") {
+      e.preventDefault();
+      e.currentTarget.blur();
     }
   };
 
@@ -48,6 +61,7 @@ export function EditableResumeText({
       contentEditable={editable ? true : undefined}
       suppressContentEditableWarning={editable ? true : undefined}
       onBlur={editable ? handleBlur : undefined}
+      onKeyDown={editable ? handleKeyDown : undefined}
       title={title}
       style={style}
     />

@@ -2155,6 +2155,76 @@ def _deterministic_polish_bullet(raw_clause: str) -> str:
     return sanitize_single_dot_bullet(cleaned)
 
 
+def _collapse_blank_lines(text: Any) -> str:
+    """Collapse embedded newlines and redundant spacing inside resume text fields."""
+    if text is None:
+        return ""
+    return re.sub(r'\s+', ' ', str(text)).strip()
+
+
+def _clean_blank_lines_in_resume(resume_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip blank lines, empty bullets, and extraneous linebreaks across all sections."""
+    if not isinstance(resume_data, dict):
+        return resume_data
+
+    if isinstance(resume_data.get("summary"), str):
+        resume_data["summary"] = _collapse_blank_lines(resume_data["summary"])
+
+    for sec in ("experience", "internships"):
+        entries = resume_data.get(sec)
+        if isinstance(entries, list):
+            for item in entries:
+                if not isinstance(item, dict):
+                    continue
+                for k in ("role", "title", "company", "organization", "duration", "dates", "location"):
+                    if isinstance(item.get(k), str):
+                        item[k] = _collapse_blank_lines(item[k])
+                if isinstance(item.get("bullets"), list):
+                    item["bullets"] = [
+                        sanitize_single_dot_bullet(_collapse_blank_lines(b))
+                        for b in item["bullets"]
+                        if _collapse_blank_lines(b)
+                    ]
+
+    if isinstance(resume_data.get("projects"), list):
+        for proj in resume_data["projects"]:
+            if not isinstance(proj, dict):
+                continue
+            for k in ("name", "title", "technologies", "tools", "duration", "link"):
+                if isinstance(proj.get(k), str):
+                    proj[k] = _collapse_blank_lines(proj[k])
+            if isinstance(proj.get("bullets"), list):
+                proj["bullets"] = [
+                    sanitize_single_dot_bullet(_collapse_blank_lines(b))
+                    for b in proj["bullets"]
+                    if _collapse_blank_lines(b)
+                ]
+
+    if isinstance(resume_data.get("certifications"), list):
+        resume_data["certifications"] = [
+            _collapse_blank_lines(c) for c in resume_data["certifications"] if _collapse_blank_lines(c)
+        ]
+
+    return resume_data
+
+
+def _is_explicit_entry_removal_request(inst_low: str, entry_kind: str) -> bool:
+    """Return True only when user explicitly asked to remove/delete a whole experience or project entry."""
+    if entry_kind == "projects":
+        if any(w in inst_low for w in ("blank", "empty", "space", "spacing", "line", "lines", "whitespace", "gap")):
+            if not re.search(r'\b(?:remove|delete|drop|omit)\s+(?:the\s+|this\s+|my\s+)?(?:\d+(?:st|nd|rd|th)?\s+)?project\b', inst_low):
+                return False
+        return bool(re.search(
+            r'\b(?:remove|delete|drop|omit)\s+(?:a|an|the|this|my)?\s*(?:\d+(?:st|nd|rd|th)?\s+)?projects?\b'
+            r'|\binstead\s+of\s+(?:this\s+)?project\b',
+            inst_low,
+        ))
+    return bool(re.search(
+        r'\b(?:remove|delete|drop|omit)\s+(?:a|an|the|this|my)?\s*(?:\d+(?:st|nd|rd|th)?\s+)?(?:experience|internship)\b',
+        inst_low,
+    ))
+
+
 def apply_surgical_edit_post_merge(
     pre_resume: Dict[str, Any],
     post_resume: Dict[str, Any],
@@ -2171,6 +2241,41 @@ def apply_surgical_edit_post_merge(
         return post_resume
 
     inst_low = normalize_copilot_instruction(instruction or "").lower()
+
+    # Global anti-accidental-deletion guard: never let an LLM drop projects or experiences
+    # unless the user explicitly asked to delete an entire project/experience entry.
+    for guarded_sec in ("projects", "experience"):
+        pre_sec = pre_resume.get(guarded_sec)
+        post_sec = post_resume.get(guarded_sec)
+        if (
+            isinstance(pre_sec, list)
+            and len(pre_sec) > 0
+            and isinstance(post_sec, list)
+            and len(post_sec) < len(pre_sec)
+            and not _is_explicit_entry_removal_request(inst_low, guarded_sec)
+        ):
+            name_key = "name" if guarded_sec == "projects" else "company"
+            post_by_name = {
+                str(item.get(name_key) or "").strip().lower(): item
+                for item in post_sec
+                if isinstance(item, dict) and str(item.get(name_key) or "").strip()
+            }
+            restored = []
+            for idx_g, orig_item in enumerate(pre_sec):
+                if not isinstance(orig_item, dict):
+                    restored.append(copy.deepcopy(orig_item))
+                    continue
+                k_low = str(orig_item.get(name_key) or "").strip().lower()
+                if k_low and k_low in post_by_name:
+                    restored.append(copy.deepcopy(post_by_name[k_low]))
+                elif len(post_sec) == 1 and target_info.get("section") == guarded_sec and target_info.get("index") == idx_g and isinstance(post_sec[0], dict):
+                    merged_g = copy.deepcopy(orig_item)
+                    merged_g.update({k: v for k, v in post_sec[0].items() if v is not None})
+                    restored.append(merged_g)
+                else:
+                    restored.append(copy.deepcopy(orig_item))
+            post_resume[guarded_sec] = restored
+
     if target_info.get("is_bulk"):
         return post_resume
 
@@ -2583,6 +2688,21 @@ def apply_direct_user_instructions(
     ])
 
     if is_removal:
+        is_blank_cleanup = bool(
+            re.search(
+                r"\b(?:blank|empty|extra|unwanted|trailing|white)\s*(?:line|lines|space|spaces|gap|gaps|row|rows|break|breaks|bullet|bullets)\b"
+                r"|\b(?:spacing|whitespace|line\s*breaks?|newlines?)\b"
+                r"|\b(?:remove|delete|clear|erase|drop|fix|strip)\s+(?:the\s+|this\s+)?(?:line|lines|space|spaces|gap|gaps)\b",
+                inst_norm_lower,
+            )
+        )
+
+        # 0. Remove Blank Lines / Empty Bullets / Extra Whitespace (NEVER delete projects or entries!)
+        if is_blank_cleanup:
+            _clean_blank_lines_in_resume(updated)
+            changes.append("Removed blank lines and extra whitespace while keeping all projects and bullets intact.")
+            return updated, changes
+
         # A. Remove Candidate Photo
         if any(w in inst_norm_lower for w in ["photo", "picture", "profile photo", "candidate photo", "avatar", "headshot"]) and not any(w in inst_norm_lower for w in ["project", "cert", "experience"]):
             if "photo" in updated:
@@ -2605,14 +2725,32 @@ def apply_direct_user_instructions(
                 p.pop("photo", None)
                 changes.append(f"Removed screenshot thumbnail from project '{p.get('name', 'Project')}'.")
 
-        # C. Remove Project (from prompt or from uploaded project screenshot — never hijack experience/bullet/summary edits)
+        # C. Remove Project — only when user explicitly targets deleting an entire project,
+        # never when targeting sub-elements (blank line, space, bullet, word, tech, typo, etc.)
         elif (
-            not any(b in inst_norm_lower for b in ["point", "points", "bullet", "bullets", "experience", "intern", "summary", "cert"])
+            not any(
+                b in inst_norm_lower
+                for b in [
+                    "point", "points", "bullet", "bullets", "experience", "intern", "summary", "cert",
+                    "line", "lines", "blank", "empty", "space", "spaces", "whitespace", "spacing",
+                    "gap", "gaps", "word", "words", "text", "phrase", "sentence", "typo", "dot",
+                    "period", "comma", "punctuation", "tech", "technology", "technologies", "stack",
+                    "metric", "number", "date", "duration", "year", "skill", "skills",
+                ]
+            )
             and ocr_target_early.get("section") in (None, "projects")
             and (
-                any(w in inst_norm_lower for w in ["project", "this project", "prjoect"])
-                or (ocr_target_early.get("section") == "projects" and "this" in inst_norm_lower)
-                or bool(ocr_text and any(p.get("name", "").lower() in ocr_text.lower() for p in updated.get("projects", [])))
+                any(w in inst_norm_lower for w in ["project", "projects", "prjoect"])
+                or any(
+                    isinstance(p, dict)
+                    and p.get("name", "").strip()
+                    and p.get("name", "").strip().lower() in inst_norm_lower
+                    for p in updated.get("projects", [])
+                )
+                or (
+                    ocr_target_early.get("section") == "projects"
+                    and bool(re.fullmatch(r'\s*(?:remove|delete|drop|erase)\s+(?:this|it|above)\s*', inst_norm_lower))
+                )
             )
         ):
             if "projects" in updated and isinstance(updated["projects"], list) and len(updated["projects"]) > 0:
@@ -2640,8 +2778,8 @@ def apply_direct_user_instructions(
                             idx_rem = i
                             break
 
-                # Fallback if "remove this project" / "delete this" with multiple projects
-                if idx_rem is None and len(updated["projects"]) > 1:
+                # Fallback only when explicitly saying "remove this project" / "remove project"
+                if idx_rem is None and len(updated["projects"]) > 1 and any(w in inst_norm_lower for w in ["project", "prjoect"]):
                     idx_rem = 0
 
                 if idx_rem is not None and 0 <= idx_rem < len(updated["projects"]):

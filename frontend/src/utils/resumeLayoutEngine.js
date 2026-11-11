@@ -59,8 +59,8 @@ export function computeSinglePageLayout(container, options = {}) {
   container.style.minHeight = "0px";
 
   // Set baseline measurement styles temporarily to obtain natural unexpanded height
-  container.style.setProperty("--page-padding-y", "18px");
-  container.style.setProperty("--page-padding-x", "24px");
+  container.style.setProperty("--page-padding-y", "20px");
+  container.style.setProperty("--page-padding-x", "48px");
   container.style.setProperty("--section-gap", "5px");
   container.style.setProperty("--section-title-margin-bottom", "2px");
   container.style.setProperty("--item-gap", "3px");
@@ -146,7 +146,7 @@ export function computeSinglePageLayout(container, options = {}) {
 
     computedVars = {
       "--page-padding-y": `${pagePaddingY}px`,
-      "--page-padding-x": "26px",
+      "--page-padding-x": "50px",
       "--section-gap": `${sectionGap}px`,
       "--section-title-margin-bottom": `${sectionTitleMarginBottom}px`,
       "--item-gap": `${itemGap}px`,
@@ -169,8 +169,8 @@ export function computeSinglePageLayout(container, options = {}) {
     fitStatus = "balanced";
     const microSec = Math.round((5 + availableDelta / numSections) * 10) / 10;
     computedVars = {
-      "--page-padding-y": "18px",
-      "--page-padding-x": "24px",
+      "--page-padding-y": "20px",
+      "--page-padding-x": "48px",
       "--section-gap": `${microSec}px`,
       "--section-title-margin-bottom": "2.5px",
       "--item-gap": "3.5px",
@@ -195,8 +195,8 @@ export function computeSinglePageLayout(container, options = {}) {
       // Mild to medium overflow: Can be fully absorbed by intelligent micro-compacting!
       fitStatus = "compacted";
       computedVars = {
-        "--page-padding-y": "8px",
-        "--page-padding-x": "16px",
+        "--page-padding-y": "12px",
+        "--page-padding-x": "42px",
         "--section-gap": "2.2px",
         "--section-title-margin-bottom": "1.0px",
         "--item-gap": "1.6px",
@@ -214,8 +214,8 @@ export function computeSinglePageLayout(container, options = {}) {
       isOverflowing = true;
       overflowPx = Math.round(overAmount);
       computedVars = {
-        "--page-padding-y": "10px",
-        "--page-padding-x": "16px",
+        "--page-padding-y": "12px",
+        "--page-padding-x": "42px",
         "--section-gap": "3px",
         "--section-title-margin-bottom": "1px",
         "--item-gap": "1.8px",

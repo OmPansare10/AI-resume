@@ -3,6 +3,7 @@ import html as html_lib
 import io
 import os
 import re
+import tempfile
 import uuid
 from datetime import datetime
 from io import BytesIO
@@ -18,10 +19,9 @@ from docx.oxml.ns import nsdecls, qn
 from docx.shared import Inches, Pt, RGBColor
 import pymupdf as fitz
 
-# Root directories
+# Root / ephemeral temp directories (exports stream from memory; Path-based helpers use OS temp)
 BACKEND_DIR = Path(__file__).resolve().parent.parent
-GENERATED_DIR = BACKEND_DIR.parent / "generated_resumes"
-GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+EXPORT_TEMP_DIR = Path(tempfile.gettempdir()) / "ai_resume_tailor"
 
 from services.fresher_resume_service import format_education_entry, sanitize_bullet_text  # noqa: E402
 
@@ -261,7 +261,7 @@ def build_resume_html_and_css(
         if is_short_single:
             body_pt, name_pt, sec_pt, hdr_gap, item_gap, b_gap, l_height = 10.0, 19.5, 10.5, 11, 7, 2.5, 1.38
         else:
-            body_pt, name_pt, sec_pt, hdr_gap, item_gap, b_gap, l_height = 8.1, 17.5, 9.2, 6.2, 3.6, 1.0, 1.25
+            body_pt, name_pt, sec_pt, hdr_gap, item_gap, b_gap, l_height = 7.9, 17.5, 9.2, 6.2, 3.6, 1.0, 1.25
     else:
         body_pt, name_pt, sec_pt, hdr_gap, item_gap, b_gap, l_height = 9.0, 19.0, 10.0, 8.5, 5.0, 1.5, 1.32
 
@@ -414,7 +414,7 @@ td.right {{ text-align: right; white-space: nowrap; }}
 }}
 ul.bullets {{
     margin: 0 0 1pt 0;
-    padding-left: 13pt;
+    padding-left: 11pt;
 }}
 ul.bullets li {{
     margin: 0 0 {b_gap}pt 0;
@@ -601,10 +601,28 @@ def _attach_pdf_contact_links(page: fitz.Page, link_targets: List[Tuple[str, str
             pass
 
 
-def render_pdf_from_resume_data(resume_data: Dict[str, Any], single_page: bool = False) -> Path:
+def _write_temp_export_file(
+    file_bytes: bytes,
+    resume_data: Dict[str, Any],
+    single_page: bool,
+    ext: str,
+) -> Path:
+    """Write export bytes to an ephemeral OS temp path (never inside the app repo)."""
+    EXPORT_TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    unique_suffix = uuid.uuid4().hex[:6]
+    default_name = "Fresher_Resume" if single_page else "Tailored_Resume"
+    clean_candidate = re.sub(r"[^a-zA-Z0-9_-]", "_", resume_data.get("name", default_name)).strip("_") or "Resume"
+    tag = "_SinglePage_Fresher" if single_page else ""
+    output_path = EXPORT_TEMP_DIR / f"{clean_candidate}{tag}_{timestamp}_{unique_suffix}.{ext}"
+    output_path.write_bytes(file_bytes)
+    return output_path
+
+
+def render_pdf_bytes_from_resume_data(resume_data: Dict[str, Any], single_page: bool = False) -> bytes:
     """
-    Render the resume into an A4 PDF matching the web preview's visual typography,
-    colors, Unicode symbols, single-line Experience/Project headers, and 2-line Education.
+    Render the resume into in-memory A4 PDF bytes matching the web preview's
+    visual typography, Unicode symbols, single-line headers, and 2-line Education.
     """
     html_body, css, link_targets, archive = build_resume_html_and_css(
         resume_data, single_page=single_page
@@ -615,7 +633,7 @@ def render_pdf_from_resume_data(resume_data: Dict[str, Any], single_page: bool =
     if single_page:
         pdf_doc = fitz.open()
         page = pdf_doc.new_page(width=page_w, height=page_h)
-        target_rect = fitz.Rect(28.0, 22.0, page_w - 28.0, page_h - 22.0)
+        target_rect = fitz.Rect(38.0, 26.0, page_w - 38.0, page_h - 26.0)
         page.insert_htmlbox(target_rect, html_body, css=css, archive=archive, scale_low=0.45)
         if len(pdf_doc) > 1:
             while len(pdf_doc) > 1:
@@ -624,7 +642,7 @@ def render_pdf_from_resume_data(resume_data: Dict[str, Any], single_page: bool =
     else:
         story = fitz.Story(html=html_body, user_css=css, archive=archive)
         mediabox = fitz.Rect(0, 0, page_w, page_h)
-        content_rect = fitz.Rect(38.0, 32.0, page_w - 38.0, page_h - 32.0)
+        content_rect = fitz.Rect(46.0, 34.0, page_w - 46.0, page_h - 34.0)
         bio = io.BytesIO()
         writer = fitz.DocumentWriter(bio)
         while True:
@@ -639,22 +657,24 @@ def render_pdf_from_resume_data(resume_data: Dict[str, Any], single_page: bool =
         if len(pdf_doc) > 0:
             _attach_pdf_contact_links(pdf_doc[0], link_targets)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    unique_suffix = uuid.uuid4().hex[:6]
-    default_name = "Fresher_Resume" if single_page else "Tailored_Resume"
-    clean_candidate = re.sub(r"[^a-zA-Z0-9_-]", "_", resume_data.get("name", default_name)).strip("_") or "Resume"
-    tag = "_SinglePage_Fresher" if single_page else ""
-    filename = f"{clean_candidate}{tag}_{timestamp}_{unique_suffix}.pdf"
-    output_path = GENERATED_DIR / filename
-    pdf_doc.save(str(output_path))
-    pdf_doc.close()
-
-    return output_path
+    try:
+        return pdf_doc.tobytes()
+    finally:
+        pdf_doc.close()
 
 
-def render_docx_from_resume_data(resume_data: Dict[str, Any], single_page: bool = False) -> Path:
+def render_pdf_from_resume_data(resume_data: Dict[str, Any], single_page: bool = False) -> Path:
     """
-    Render the resume into a clean A4 Microsoft Word document (.docx) matching
+    Render the resume into an A4 PDF written to the OS temp directory (for callers
+    requiring a Path) without persisting files inside the application directory.
+    """
+    pdf_bytes = render_pdf_bytes_from_resume_data(resume_data, single_page=single_page)
+    return _write_temp_export_file(pdf_bytes, resume_data, single_page, "pdf")
+
+
+def render_docx_bytes_from_resume_data(resume_data: Dict[str, Any], single_page: bool = False) -> bytes:
+    """
+    Render the resume into in-memory A4 Microsoft Word (.docx) bytes matching
     the web preview's exact structure, fonts, colors, single-line Experience headers,
     italic Project tech stacks, 2-line Education, and clickable contact links.
     """
@@ -662,8 +682,8 @@ def render_docx_from_resume_data(resume_data: Dict[str, Any], single_page: bool 
     body_font, _, _, _, _ = _resolve_font_spec(str(resume_data.get("font_family") or ""))
 
     # Explicitly configure A4 dimensions (8.27 x 11.69 in) matching preview & PDF proportions
-    margin_y = 0.38 if single_page else 0.52
-    margin_x = 0.45 if single_page else 0.58
+    margin_y = 0.40 if single_page else 0.52
+    margin_x = 0.53 if single_page else 0.64
     printable_w = 8.27 - (2.0 * margin_x)
     for section in doc.sections:
         section.page_width = Inches(8.27)
@@ -952,16 +972,30 @@ def render_docx_from_resume_data(resume_data: Dict[str, Any], single_page: bool 
         for c in certs:
             add_compact_bullet(c)
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    unique_suffix = uuid.uuid4().hex[:6]
-    default_name = "Fresher_Resume" if single_page else "Tailored_Resume"
-    clean_candidate = re.sub(r"[^a-zA-Z0-9_-]", "_", resume_data.get("name", default_name)).strip("_") or "Resume"
-    tag = "_SinglePage_Fresher" if single_page else ""
-    filename = f"{clean_candidate}{tag}_{timestamp}_{unique_suffix}.docx"
-    output_path = GENERATED_DIR / filename
-    doc.save(str(output_path))
+    bio = BytesIO()
+    doc.save(bio)
+    return bio.getvalue()
 
-    return output_path
+
+def render_docx_from_resume_data(resume_data: Dict[str, Any], single_page: bool = False) -> Path:
+    """
+    Render the resume into an A4 DOCX written to the OS temp directory (for callers
+    requiring a Path) without persisting files inside the application directory.
+    """
+    docx_bytes = render_docx_bytes_from_resume_data(resume_data, single_page=single_page)
+    return _write_temp_export_file(docx_bytes, resume_data, single_page, "docx")
+
+
+def generate_docx_bytes(resume_data: Dict[str, Any]) -> bytes:
+    """Generate in-memory DOCX bytes for direct HTTP download streaming."""
+    use_single = bool(resume_data.get("single_page") or resume_data.get("compact_layout"))
+    return render_docx_bytes_from_resume_data(resume_data, single_page=use_single)
+
+
+def generate_pdf_bytes(resume_data: Dict[str, Any]) -> bytes:
+    """Generate in-memory PDF bytes for direct HTTP download streaming."""
+    use_single = bool(resume_data.get("single_page") or resume_data.get("compact_layout"))
+    return render_pdf_bytes_from_resume_data(resume_data, single_page=use_single)
 
 
 def generate_docx(resume_data: Dict[str, Any]) -> Path:

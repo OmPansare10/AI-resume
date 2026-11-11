@@ -46,10 +46,6 @@ from services.resume_tailor import (
 
 logger = logging.getLogger(__name__)
 
-BACKEND_DIR = Path(__file__).resolve().parent.parent
-GENERATED_DIR = BACKEND_DIR.parent / "generated_resumes"
-GENERATED_DIR.mkdir(parents=True, exist_ok=True)
-
 
 import copy
 
@@ -1443,6 +1439,18 @@ Return ONLY valid JSON with ONLY the targeted change populated and 'changes' arr
         "changes": changes,
         "image_extracted_text": combined_ocr
     }
+
+
+def generate_single_page_pdf_bytes(resume_data: Dict[str, Any]) -> bytes:
+    """Return Single-Page A4 PDF bytes in memory for direct HTTP download streaming."""
+    from services.resume_generator import render_pdf_bytes_from_resume_data
+    return render_pdf_bytes_from_resume_data(resume_data, single_page=True)
+
+
+def generate_single_page_docx_bytes(resume_data: Dict[str, Any]) -> bytes:
+    """Return Single-Page A4 DOCX bytes in memory for direct HTTP download streaming."""
+    from services.resume_generator import render_docx_bytes_from_resume_data
+    return render_docx_bytes_from_resume_data(resume_data, single_page=True)
 
 
 def generate_single_page_pdf(resume_data: Dict[str, Any]) -> Path:
